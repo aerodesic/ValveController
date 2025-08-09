@@ -36,6 +36,7 @@
 
 #include "Zigbee.h"
 #include "ValveController.h"
+//#include "esp_sleep.h"
 
 /* Zigbee light bulb configuration */
 
@@ -52,57 +53,107 @@ void setLED(bool value) {
 TaskHandle_t valveThreadHandle;
 QueueHandle_t valveCommandQueue;
 
-#define OPEN_PIN    21
-#define CLOSE_PIN   22
-#define POWER_PIN   23
+#define OPEN_PIN      21
+#define CLOSE_PIN     22
+#define POWER_PIN     23
+#define IDENTIFY_PIN  16
 
-// Valve handle thread - this thread never ends
+typedef enum {
+  CLOSE_VALVE,
+  OPEN_VALVE,
+  IDENTIFY_VALVE
+} ValveCommand_t;
+
+typedef struct __ValveMessage_struct {
+  ValveCommand_t command;
+  uint16_t parameter;
+} ValveMessage_t;
+
+// For some reason this function prototype is required else I get an undefined
+// ValveCommand_t in the function definition.  Even declaring the function as
+// 'static' doesn't fix the issue.
+void sendValveMessage(ValveCommand_t command, uint16_t parameter);
+
+void sendValveMessage(ValveCommand_t command, uint16_t parameter) {
+  ValveMessage_t message = {.command = command, .parameter = parameter };
+
+  if(xQueueSend(valveCommandQueue, (void *) &message, (TickType_t) 10) != pdPASS) {
+    log_e("sendValveMessage could not send to queue!");
+  }
+}
+
+// Valve handler thread - this thread never ends
 void valveThread(void *) {
+
   for (;;) {
     // Wait for a message on queue
-    uint8_t command;
+    ValveMessage_t message;
 
-    // Attempt to receive an integer from myQueue, waiting for a maximum of 10 ticks if the queue is empty
-    if (xQueueReceive(valveCommandQueue, &command, 10) == pdPASS)
-    {
+    // Attempt to receive an integer from queue, waiting for a maximum of 10 ticks if the queue is empty
+    if (xQueueReceive(valveCommandQueue, (void *) &message, 10) == pdPASS) {
       // Item successfully received, process command
-      if (command == 0) {
-        // Close valve
-        digitalWrite(POWER_PIN, HIGH);
-        digitalWrite(CLOSE_PIN, HIGH);
-        delay(5000);
-        digitalWrite(CLOSE_PIN, LOW);
-        digitalWrite(POWER_PIN, LOW);
-    
-      } else {
-        // Open valve
-        digitalWrite(POWER_PIN, HIGH);
-        digitalWrite(OPEN_PIN, HIGH);
-        delay(5000);
-        digitalWrite(OPEN_PIN, LOW);
-        digitalWrite(POWER_PIN, LOW);
+      log_v("valveThread: command %u parameter %u", message.command, message.parameter);
+      switch (message.command) {
+        case CLOSE_VALVE: {
+          // Close valve
+          digitalWrite(POWER_PIN, HIGH);
+          digitalWrite(CLOSE_PIN, HIGH);
+          delay(5000);
+          digitalWrite(CLOSE_PIN, LOW);
+          digitalWrite(POWER_PIN, LOW);
+          break;
+        }  
+        case OPEN_VALVE: {
+          // Open valve
+          digitalWrite(POWER_PIN, HIGH);
+          digitalWrite(OPEN_PIN, HIGH);
+          delay(5000);
+          digitalWrite(OPEN_PIN, LOW);
+          digitalWrite(POWER_PIN, LOW);
+          break;
+        }
+        case IDENTIFY_VALVE: {
+          uint16_t count = message.parameter;
+          while(count != 0) {
+            digitalWrite(IDENTIFY_PIN, HIGH);
+            delay(250);
+            digitalWrite(IDENTIFY_PIN, LOW);
+            delay(250);
+            digitalWrite(IDENTIFY_PIN, HIGH);
+            delay(250);
+            digitalWrite(IDENTIFY_PIN, LOW);
+            delay(250);
+            --count;
+          }
+          break;
+        }
+        default: {
+          break;
+        }
       }
-    }
-    else
-    {
-        // No item received within the specified timeout, or queue was empty
+    } else {
+      // No item received within the specified timeout, or queue was empty
       delay(50);
     }
   }
+
 }
+
 
 void valveChanged(bool value) {
   setLED(value);
   log_v("valveChanged: %s, on_time %d\n", value ? "true" : "false", zbValve.getOnTime());
-  // Send command to thread
-  uint8_t command = value ? 1 : 0;
-  if( xQueueSend(valveCommandQueue, &command, (TickType_t) 10) != pdPASS) {
-    log_e("valveChange could not send to queue!");
-  }
+  sendValveMessage(value ? OPEN_VALVE : CLOSE_VALVE, 0);
+}
+
+void valveIdentify(uint16_t time_in_seconds) {
+  sendValveMessage(IDENTIFY_VALVE, time_in_seconds);
 }
 
 /********************* Arduino functions **************************/
 void setup() {
+  //CONFIG_FREERTOS_USE_TICKLESS_IDLE();
+
   Serial.begin(115200);
 
   // Init LED and turn it OFF (if LED_PIN == RGB_BUILTIN, the rgbLedWrite() will be used under the hood)
@@ -116,6 +167,8 @@ void setup() {
   digitalWrite(OPEN_PIN, LOW);
   pinMode(CLOSE_PIN, OUTPUT);
   digitalWrite(CLOSE_PIN, LOW);
+  pinMode(IDENTIFY_PIN, OUTPUT);
+  digitalWrite(IDENTIFY_PIN, LOW);
 
   // Init button for factory reset
   pinMode(button, INPUT_PULLUP);
@@ -130,8 +183,11 @@ void setup() {
   // Set callback function for light change
   zbValve.onValveChanged(valveChanged);
 
+  // Handle identify requests
+  zbValve.onIdentify(valveIdentify);
+
   // Start a thread to manage the opening and closing of the valve
-  valveCommandQueue = xQueueCreate(10, sizeof( uint8_t ));
+  valveCommandQueue = xQueueCreate(5, sizeof(ValveMessage_t));
   if (valveCommandQueue == NULL) {
     log_e("Valve control control queue could not be created!");
     log_e("Rebooting...");
@@ -144,8 +200,7 @@ void setup() {
     ESP.restart();
   } else {
     // Send command to close the valve
-    uint8_t close_command = 0;
-    xQueueSend(valveCommandQueue, &close_command, (TickType_t) 10);
+    valveChanged(false);
 
     //Add endpoint to Zigbee Core
     log_v("Adding ValveController endpoint to Zigbee Core");
@@ -200,5 +255,11 @@ void loop() {
     // Toggle valve by pressing the button
     zbValve.setValve(!zbValve.getValveState());
   }
+  // Enable timer wakeup
+  //esp_sleep_enable_timer_wakeup(SLEEP_TIME_US);
+
   delay(100);
+
+  // Enter Light Sleep mode
+  //esp_light_sleep_start();
 }

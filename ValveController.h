@@ -42,8 +42,7 @@ public:
   static void TurnOffCallback(TimerHandle_t timer);
 
   void StartTurnOffTimer(TickType_t period);
-
-
+  
 private:
   void zbAttributeSet(const esp_zb_zcl_set_attr_value_message_t *message) override;
   //callback function to be called on light change
