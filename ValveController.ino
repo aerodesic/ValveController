@@ -34,25 +34,33 @@
 #error "Zigbee end device mode is not selected in Tools->Zigbee mode"
 #endif
 
+#define ENABLE_LIGHT_SLEEP         1
+#define ENABLE_EXTERNAL_ANTENNA    0
+
 #include "Zigbee.h"
 #include "ValveController.h"
-//#include "esp_sleep.h"
+#include "esp_event.h"
 
-/* Zigbee light bulb configuration */
+#if ENABLE_LIGHT_SLEEP
+#define uS_TO_S_FACTOR     1000000ULL /* Conversion factor for micro seconds to seconds */
+#define TIME_TO_SLEEP      1          /* In seconds */
+#define TIME_TO_STAY_AWAKE 60         /* In seconds */
+#endif
 
-uint8_t led = LED_BUILTIN;
-uint8_t button = BOOT_PIN;
 
 ValveController zbValve = ValveController();
 
+bool _currentValveState = false;
+
 /********************* RGB LED functions **************************/
 void setLED(bool value) {
-  digitalWrite(led, !value);
+  digitalWrite(LED_BUILTIN, !value);
 }
 
 TaskHandle_t valveThreadHandle;
 QueueHandle_t valveCommandQueue;
 
+#define TOGGLE_PIN    2
 #define OPEN_PIN      21
 #define CLOSE_PIN     22
 #define POWER_PIN     23
@@ -84,6 +92,7 @@ void sendValveMessage(ValveCommand_t command, uint16_t parameter) {
 
 // Valve handler thread - this thread never ends
 void valveThread(void *) {
+  unsigned long start = millis();
 
   for (;;) {
     // Wait for a message on queue
@@ -131,16 +140,28 @@ void valveThread(void *) {
           break;
         }
       }
+      // Restart SLEEP start any time we do something.
+      start = millis();
+#if ENABLE_LIGHT_SLEEP
+    } else if ((millis() - start) >= TIME_TO_STAY_AWAKE*1000) {
+      // No work to do so sleepy-bye
+      log_v("Sleeping");
+      esp_light_sleep_start();
+      log_v("Wakeup");
+      //esp_zb_start(true);
+      // Zigbee.scanNetworks();
+      zbValve.setValve(_currentValveState);
+      start = millis();
+#endif
     } else {
       // No item received within the specified timeout, or queue was empty
       delay(50);
     }
   }
-
 }
 
-
 void valveChanged(bool value) {
+  _currentValveState = value;
   setLED(value);
   log_v("valveChanged: %s, on_time %d\n", value ? "true" : "false", zbValve.getOnTime());
   sendValveMessage(value ? OPEN_VALVE : CLOSE_VALVE, 0);
@@ -150,15 +171,46 @@ void valveIdentify(uint16_t time_in_seconds) {
   sendValveMessage(IDENTIFY_VALVE, time_in_seconds);
 }
 
+int togglePinCounter = 0;
+void IRAM_ATTR togglePinInterrupt() { // TOGGLE PIN interrupts
+  togglePinCounter++;
+}
+
+ESP_EVENT_DECLARE_BASE(ZB_APP_EVENT);
+
+void my_zigbee_signal_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+  // Cast the event_data to esp_zb_app_signal_t
+  esp_zb_app_signal_t *signal_struct = (esp_zb_app_signal_t *)event_data;
+
+  // Retrieve signal type and error status
+  esp_zb_app_signal_type_t sig_type = (esp_zb_app_signal_type_t) *signal_struct->p_app_signal; 
+  esp_err_t err_status = signal_struct->esp_err_status;
+
+  switch(sig_type) {
+    case ESP_ZB_COMMON_SIGNAL_CAN_SLEEP: {
+      log_v("'can sleep' received");
+      break;
+    }
+    default: {
+      log_v("ZDO signal: %s (0x%x), status: %s", esp_zb_zdo_signal_to_string(sig_type), sig_type, esp_err_to_name(err_status));
+      break;
+    }
+  }
+}
+
 /********************* Arduino functions **************************/
 void setup() {
-  //CONFIG_FREERTOS_USE_TICKLESS_IDLE();
-
   Serial.begin(115200);
 
+#if ENABLE_LIGHT_SLEEP
+  esp_zb_sleep_enable(true);
+#endif
+
   // Init LED and turn it OFF (if LED_PIN == RGB_BUILTIN, the rgbLedWrite() will be used under the hood)
-  pinMode(led, OUTPUT);
-  digitalWrite(led, LOW);
+  pinMode(BOOT_PIN, INPUT_PULLUP);
+
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
 
   // Set mode for valve control pins
   pinMode(POWER_PIN, OUTPUT);
@@ -169,9 +221,17 @@ void setup() {
   digitalWrite(CLOSE_PIN, LOW);
   pinMode(IDENTIFY_PIN, OUTPUT);
   digitalWrite(IDENTIFY_PIN, LOW);
+  
+  pinMode(TOGGLE_PIN, INPUT_PULLUP); // Configure the pin with internal pull-up
+  attachInterrupt(digitalPinToInterrupt(TOGGLE_PIN), togglePinInterrupt, FALLING); // Trigger on falling edge
 
-  // Init button for factory reset
-  pinMode(button, INPUT_PULLUP);
+  // Catch app signals.
+  esp_event_handler_instance_register(ZB_APP_EVENT, ESP_EVENT_ANY_ID, my_zigbee_signal_handler, NULL, NULL);
+
+#if ENABLE_LIGHT_SLEEP
+  // Configure the wake up source and set to wake up every so often
+  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+#endif
 
   //Optional: set Zigbee device name and model
   zbValve.setManufacturerAndModel("Aerodesic", "Valve");
@@ -185,6 +245,8 @@ void setup() {
 
   // Handle identify requests
   zbValve.onIdentify(valveIdentify);
+
+  //Zigbee.setRxOnWhenIdle(false);
 
   // Start a thread to manage the opening and closing of the valve
   valveCommandQueue = xQueueCreate(5, sizeof(ValveMessage_t));
@@ -206,7 +268,7 @@ void setup() {
     log_v("Adding ValveController endpoint to Zigbee Core");
     Zigbee.addEndpoint(&zbValve);
 
-#if 0
+#if ENABLE_EXTERNAL_ANTENNA
     // Enabling external antenna
     pinMode(3, OUTPUT);
     digitalWrite(3, LOW);//turn on this function
@@ -218,8 +280,16 @@ void setup() {
 
     //Open network for 180 seconds after boot
     //Zigbee.setRebootOpenNetwork(180);
+    // Create a custom Zigbee configuration for End Device with keep alive 10s to avoid interference with reporting data
+    //esp_zb_cfg_t zigbeeConfig = ZIGBEE_DEFAULT_ED_CONFIG();
+    //zigbeeConfig.nwk_cfg.zed_cfg.keep_alive = 10000;
+
+    // For battery powered devices, it can be better to set timeout for Zigbee Begin to lower value to save battery
+    // If the timeout has been reached, the network channel mask will be reset and the device will try to connect again after reset (scanning all channels)
+    //Zigbee.setTimeout(10000);  // Set timeout for Zigbee Begin to 10s (default is 30s)
 
     // When all EPs are registered, start Zigbee. By default acts as ZIGBEE_END_DEVICE
+    //if (!Zigbee.begin(&zigbeeConfig, false)) {
     if (!Zigbee.begin()) {
       log_e("Zigbee failed to start!");
       log_e("Rebooting...");
@@ -239,24 +309,35 @@ void setup() {
 
 void loop() {
   // Checking button for factory reset
-  if (digitalRead(button) == LOW) {  // Push button pressed
+  if (digitalRead(BOOT_PIN) == LOW) {  // Push button pressed
     // Key debounce handling
     delay(100);
     int startTime = millis();
-    while (digitalRead(button) == LOW) {
+    while (digitalRead(BOOT_PIN) == LOW) {
       delay(50);
       if ((millis() - startTime) > 3000) {
         // If key pressed for more than 3secs, factory reset Zigbee and reboot
         log_v("Resetting Zigbee to factory and rebooting in 1s.");
         delay(1000);
         Zigbee.factoryReset();
+        Serial.println("Going to endless sleep, press RESET button or power off/on the device to wake up");
+        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+        esp_deep_sleep_start();
       }
     }
-    // Toggle valve by pressing the button
-    zbValve.setValve(!zbValve.getValveState());
   }
   // Enable timer wakeup
   //esp_sleep_enable_timer_wakeup(SLEEP_TIME_US);
+
+  if (togglePinCounter != 0) {
+    // Ignore until half second after startup.
+    if (millis() > 500) {
+      log_v("togglePinCounter %d", togglePinCounter);
+      // Toggle valve by pressing the button
+      zbValve.setValve(!zbValve.getValveState());
+    }
+    togglePinCounter = 0;
+  }
 
   delay(100);
 

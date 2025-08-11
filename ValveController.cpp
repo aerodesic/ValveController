@@ -107,15 +107,23 @@ void ValveController::ValveChanged() {
 }
 
 bool ValveController::setValve(bool state) {
-  esp_zb_zcl_status_t ret = ESP_ZB_ZCL_STATUS_SUCCESS;
-  _current_state = state;
-  ValveChanged();
 
+  if (state != _current_state) {
+    _current_state = state;
+    ValveChanged();
+  }
+  
   log_v("Updating on/off valve state to %d", state);
-  /* Update on/off light state */
+
+  /* Update on/off state */
   esp_zb_lock_acquire(portMAX_DELAY);
-  ret = esp_zb_zcl_set_attribute_val(
-    getEndpoint(), ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID, &_current_state, false
+  esp_zb_zcl_status_t ret = esp_zb_zcl_set_attribute_val(
+    getEndpoint(),
+    ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+    ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+    ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
+    &_current_state,
+    false
   );
   esp_zb_lock_release();
 
