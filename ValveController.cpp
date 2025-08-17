@@ -1,8 +1,11 @@
 #include "ValveController.h"
 #if CONFIG_ZB_ENABLED
 
+#define DEFAULT_ON_TIME_VALUE 3600   // .1 hour (6 min) hour as .1 second units
+
 ValveController::ValveController(uint8_t endpoint) 
 : ZigbeeEP(endpoint)
+, _on_time_value(DEFAULT_ON_TIME_VALUE)
 , _turn_off_timer(NULL) {
   _device_id = ESP_ZB_HA_ON_OFF_LIGHT_DEVICE_ID;
 
@@ -88,7 +91,9 @@ void ValveController::zbAttributeSet(const esp_zb_zcl_set_attr_value_message_t *
     ValveChanged();
   }
 }
-
+ValveController::zbAttributeGet(){
+  
+}
 void ValveController::ValveChanged() {
   // First do handling of the on_time value.
   if (_current_state) {
@@ -128,7 +133,7 @@ bool ValveController::setValve(bool state) {
   esp_zb_lock_release();
 
   if (ret != ESP_ZB_ZCL_STATUS_SUCCESS) {
-    log_e("Failed to set light state: 0x%x: %s", ret, esp_zb_zcl_status_to_name(ret));
+    log_e("Failed to set valve state: 0x%x: %s", ret, esp_zb_zcl_status_to_name(ret));
     return false;
   }
   return true;

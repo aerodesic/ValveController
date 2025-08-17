@@ -34,7 +34,7 @@
 #error "Zigbee end device mode is not selected in Tools->Zigbee mode"
 #endif
 
-#define ENABLE_LIGHT_SLEEP         1
+#define ENABLE_LIGHT_SLEEP         0
 #define ENABLE_EXTERNAL_ANTENNA    0
 
 #include "Zigbee.h"
@@ -176,7 +176,7 @@ void IRAM_ATTR togglePinInterrupt() { // TOGGLE PIN interrupts
   togglePinCounter++;
 }
 
-ESP_EVENT_DECLARE_BASE(ZB_APP_EVENT);
+// ESP_EVENT_DECLARE_BASE(WIFI_EVENT);
 
 void my_zigbee_signal_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
   // Cast the event_data to esp_zb_app_signal_t
@@ -188,11 +188,11 @@ void my_zigbee_signal_handler(void *arg, esp_event_base_t event_base, int32_t ev
 
   switch(sig_type) {
     case ESP_ZB_COMMON_SIGNAL_CAN_SLEEP: {
-      log_v("'can sleep' received");
+      log_v("'can sleep' received; event_base %u event_id %d", event_base, event_id);
       break;
     }
     default: {
-      log_v("ZDO signal: %s (0x%x), status: %s", esp_zb_zdo_signal_to_string(sig_type), sig_type, esp_err_to_name(err_status));
+      log_v("ZDO signal: %s (0x%x), event_base %u status: %s", esp_zb_zdo_signal_to_string(sig_type), sig_type, event_base, esp_err_to_name(err_status));
       break;
     }
   }
@@ -226,7 +226,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(TOGGLE_PIN), togglePinInterrupt, FALLING); // Trigger on falling edge
 
   // Catch app signals.
-  esp_event_handler_instance_register(ZB_APP_EVENT, ESP_EVENT_ANY_ID, my_zigbee_signal_handler, NULL, NULL);
+  esp_event_handler_instance_register(ESP_EVENT_ANY_BASE, ESP_EVENT_ANY_ID, my_zigbee_signal_handler, NULL, NULL);
 
 #if ENABLE_LIGHT_SLEEP
   // Configure the wake up source and set to wake up every so often
@@ -238,7 +238,6 @@ void setup() {
 
   // Notify it is battery powered
   zbValve.setPowerSource(ZB_POWER_SOURCE_BATTERY, 100, 35);
-  //zbValve.setPowerSource(ZB_POWER_SOURCE_MAINS, 100, 35);
   
   // Set callback function for light change
   zbValve.onValveChanged(valveChanged);
@@ -278,18 +277,6 @@ void setup() {
     log_v("External antenna enabled");
 #endif
 
-    //Open network for 180 seconds after boot
-    //Zigbee.setRebootOpenNetwork(180);
-    // Create a custom Zigbee configuration for End Device with keep alive 10s to avoid interference with reporting data
-    //esp_zb_cfg_t zigbeeConfig = ZIGBEE_DEFAULT_ED_CONFIG();
-    //zigbeeConfig.nwk_cfg.zed_cfg.keep_alive = 10000;
-
-    // For battery powered devices, it can be better to set timeout for Zigbee Begin to lower value to save battery
-    // If the timeout has been reached, the network channel mask will be reset and the device will try to connect again after reset (scanning all channels)
-    //Zigbee.setTimeout(10000);  // Set timeout for Zigbee Begin to 10s (default is 30s)
-
-    // When all EPs are registered, start Zigbee. By default acts as ZIGBEE_END_DEVICE
-    //if (!Zigbee.begin(&zigbeeConfig, false)) {
     if (!Zigbee.begin()) {
       log_e("Zigbee failed to start!");
       log_e("Rebooting...");
@@ -326,8 +313,6 @@ void loop() {
       }
     }
   }
-  // Enable timer wakeup
-  //esp_sleep_enable_timer_wakeup(SLEEP_TIME_US);
 
   if (togglePinCounter != 0) {
     // Ignore until half second after startup.
